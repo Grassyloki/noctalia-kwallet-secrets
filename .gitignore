@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# luau-lsp type definitions, fetched on demand from official-plugins
+noctalia.d.luau
