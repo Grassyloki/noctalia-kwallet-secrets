@@ -54,7 +54,8 @@ To see what the wallet actually holds, run the helper directly. It prints entry
 and key *names* only, never a password:
 
 ```sh
-kwallet-secrets/scripts/kwallet-nm-agent.py --check --with-8021x
+~/.local/state/noctalia/plugins/materialized/community/kwallet-secrets/scripts/kwallet-nm-agent.py \
+  --check --with-8021x
 ```
 
 If a network still prompts, the usual causes are a locked wallet, a profile
@@ -140,9 +141,12 @@ identifier.
 
 ## Notes
 
-- **Processes spawned.** One long-lived `python3` process per session, plus the
-  short shell commands the service uses to check on it. Nothing else is
-  executed.
+- **Processes spawned.** One long-lived `python3` process per session. Around
+  it the service runs only short-lived shell commands: `grep` against
+  `/proc/net/unix` and `id -u` to check whether the helper is up, `setsid` plus
+  `systemd-cat` to launch it, and `pkill` to stop it when a setting changes.
+  `grep`, `id`, and `setsid` are not declared as dependencies because they come
+  with coreutils and util-linux on every supported system.
 - **Network access.** None. The helper talks to two D-Bus buses and nothing
   else: NetworkManager on the system bus, KWallet on the session bus.
 - **Files written.** None. The plugin writes no state of its own; the only thing
@@ -156,12 +160,16 @@ identifier.
   wallet for one network, `nmcli connection modify UUID
   802-11-wireless-security.psk-flags 0` together with the password moves it into
   NetworkManager's own store.
-- **Running it by hand.** Stop the supervised copy first, since the second
-  instance would exit on the lock:
+- **Running it by hand.** The helper lives at
+  `~/.local/state/noctalia/plugins/materialized/community/kwallet-secrets/scripts/kwallet-nm-agent.py`
+  once the plugin is installed, and `--help` lists every flag. Stop the
+  supervised copy first, since a second instance exits immediately on its lock:
 
   ```sh
+  cd ~/.local/state/noctalia/plugins/materialized/community/kwallet-secrets
   pkill -f 'kwallet-nm-agent[.]py'
-  kwallet-secrets/scripts/kwallet-nm-agent.py --debug
+  ./scripts/kwallet-nm-agent.py --debug
   ```
 
-  The service restarts it within 30 seconds once you stop the manual run.
+  The service starts its own copy again within 30 seconds of the manual run
+  ending.
