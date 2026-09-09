@@ -91,8 +91,8 @@ NetworkManager: <info> device (wlan0): Activation: (wifi) connection 'WAN2-DIREC
 
 - [x] The directory name matches the part of `id` after the `/` in `plugin.toml` exactly.
 - [x] It ships `plugin.toml`, `README.md`, `thumbnail.webp`, and `translations/en.json`.
-- [x] `README.md` follows the README template, documents every entry id and dependency, and includes exact panel IPC commands and launcher prefixes where applicable.
-- [ ] I created `thumbnail.webp` with the thumbnail generator.
+- [x] `README.md` follows the [README template](https://github.com/noctalia-dev/community-plugins/blob/main/README_TEMPLATE.md), documents every entry id and dependency, and includes exact panel IPC commands and launcher prefixes where applicable.
+- [ ] `thumbnail.webp` is present and relevant; for a new plugin I created it with the [thumbnail generator](https://assets.noctalia.dev/plugins/thumbnail-generator.html), and for an update I regenerated it with the generator if the visual identity or user-facing appearance changed.
 - [x] `version` follows semver and is bumped in this PR; `plugin_api` is the oldest API level this plugin requires.
 - [x] Every non-English translation in this PR uses a locale supported by Noctalia core, and I can read, write, and understand that language well enough to review and maintain it (no unreviewed machine/LLM translations).
 - [x] I did not edit `catalog.toml`; CI generates it.

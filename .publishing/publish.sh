@@ -68,6 +68,15 @@ for f in plugin.toml README.md thumbnail.webp translations/en.json; do
   [[ -f "$SOURCE_REPO/$PLUGIN_DIR/$f" ]] || fail "missing required file: $PLUGIN_DIR/$f"
 done
 
+# CI matches checklist lines against the PR template verbatim, so check the body
+# before touching git. Needs the fork checkout, so it is re-run after the fetch.
+check_body() {
+  local args=(); if [[ "$DRAFT" != "true" ]]; then args=(--ready); fi
+  "$SOURCE_REPO/.publishing/check-pr-body.py" "${args[@]}" \
+    || fail "fix PR-BODY.md before publishing (see .publishing/NOTES.md)"
+}
+check_body
+
 # The source repo should be clean, so the fork gets a committed state.
 if ! git -C "$SOURCE_REPO" diff --quiet || ! git -C "$SOURCE_REPO" diff --cached --quiet; then
   warn "source repo has uncommitted changes -- they will still be copied"
@@ -90,6 +99,8 @@ git -C "$FORK_PATH" fetch upstream "$UPSTREAM_BRANCH" --quiet
 git -C "$FORK_PATH" checkout -B "$PR_BRANCH" "upstream/$UPSTREAM_BRANCH" --quiet
 
 # ---- copy the plugin ---------------------------------------------------------
+check_body   # again, now that the fork holds the current enforce-pr-template.py
+
 info "Copying $PLUGIN_DIR into the fork"
 rm -rf "${FORK_PATH:?}/$PLUGIN_DIR"                                  # replace wholesale so deletions propagate
 cp -r "$SOURCE_REPO/$PLUGIN_DIR" "$FORK_PATH/$PLUGIN_DIR"

@@ -1,8 +1,23 @@
 # Publishing notes — noctalia-dev/community-plugins
 
 `PR-BODY.md` is the PR body, fed verbatim to `gh pr create --body-file`.
-Keep the `<!-- noctalia-pr-template:v1 -->` marker on line 1 — the bot closes
-PRs that lose the template structure. Two boxes are left UNCHECKED on purpose.
+Keep the `<!-- noctalia-pr-template:v1 -->` marker on line 1 — the bot converts
+a ready PR that loses the template structure back to Draft (it never closes it).
+Two boxes are left UNCHECKED on purpose.
+
+CHECKLIST WORDING IS MATCHED VERBATIM
+
+`.github/workflows/scripts/enforce-pr-template.py` looks for each checklist line
+as an exact substring of the whitespace-collapsed body. A paraphrased line is
+reported as "the checklist entry: ..." and fails CI even while the PR is a draft,
+which is what happened on the first run of PR #683 (the README and thumbnail
+lines had been shortened). Line wrapping is safe; changed words are not.
+`check-pr-body.py` runs that same upstream code against PR-BODY.md and is a
+preflight in publish.sh, so copy wording from the fork's PULL_REQUEST_TEMPLATE.md
+rather than retyping it.
+
+Unchecked boxes are fine while the PR is a draft; the "checked checklist entry"
+errors only appear under --ready.
 
 BEFORE MARKING READY FOR REVIEW
 
