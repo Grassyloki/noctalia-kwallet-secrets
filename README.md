@@ -28,6 +28,37 @@ noctalia msg plugins update dev
 
 `.luau` edits hot-reload; `plugin.toml` changes need the `update`.
 
+## Layout
+
+```
+kwallet-secrets/     the plugin, one top-level directory as community-plugins requires
+.publishing/         everything about getting it upstream; ignored by the plugin loader
+  PR-BODY.md         the pull request body, used verbatim by gh
+  NOTES.md           what to settle before taking the PR out of draft
+  publish.sh         fork -> branch -> copy -> commit -> push -> open/update the PR
+```
+
+The plugin directory has to stay at the repo root and has to be named after the
+part of its `id` after the `/` -- that is how both `plugins source add ... git`
+and the upstream repo find it. Anything else lives in a dot-directory so the
+loader skips it.
+
+## Publishing upstream
+
+```sh
+.publishing/publish.sh            # opens the PR as a draft
+.publishing/publish.sh --ready    # opens it ready for review
+```
+
+The script is idempotent: it refreshes the branch from `upstream/main`, replaces
+the plugin directory wholesale, refuses to touch anything outside it (CI owns
+`catalog.toml`), and edits the existing PR instead of opening a second one. The
+fork checkout it works in is `~/Projects/noctalia-community-plugins`.
+
+Updating a released plugin is the same command -- bump `version` in
+`plugin.toml` first, and tick the "Update to an existing plugin" box in
+`.publishing/PR-BODY.md`.
+
 ## License
 
 MIT. See [kwallet-secrets/LICENSE](kwallet-secrets/LICENSE).
