@@ -8,8 +8,9 @@ folder "Network Management") -- the same folder plasma-nm writes to, keyed
 
 Why this exists: on a niri/Noctalia session the shell's own secret agent has
 no persistent store, so every agent-owned profile (psk-flags=1) pops a
-password prompt. Registering this agent alongside it makes those profiles
-connect from the wallet instead, without needing kded6/plasma-nm alive.
+password prompt, and every VPN profile asks for its password on each connect.
+Registering this agent alongside it makes those profiles connect from the
+wallet instead, without needing kded6/plasma-nm alive.
 
 Secret VALUES are never logged -- only ssid/uuid/setting names and hit/miss.
 """
@@ -51,7 +52,11 @@ KWALLET_IFACE = "org.kde.KWallet"
 FLAG_ALLOW_INTERACTION = 0x1
 FLAG_REQUEST_NEW = 0x2
 
-# Secret keys we are willing to store per setting, mirroring plasma-nm.
+# Secret keys we are willing to store per setting, mirroring plasma-nm. The
+# "vpn" setting has no entry here on purpose: its key names come from whichever
+# VPN plugin the profile uses (openvpn's password/cert-pass/http-proxy-password,
+# vpnc's "Xauth password", openconnect's cookie, ...), so it is handled by
+# passing through whatever the wallet or NM actually hands over.
 SECRET_KEYS = {
     "802-11-wireless-security": (
         "psk",
@@ -67,7 +72,18 @@ SECRET_KEYS = {
         "private-key-password",
         "phase2-private-key-password",
     ),
+    "wireguard": (
+        "private-key",
+    ),
 }
+
+VPN_SETTING = "vpn"                 # the setting whose secrets are nested, see below
+VPN_SECRETS_KEY = "VpnSecrets"      # plasma-nm packs every VPN secret into this one map key
+VPN_SECRETS_SEP = "%SEP%"           # ... as key/value tokens joined by this separator
+
+WG_SETTING = "wireguard"            # NM-native WireGuard, not the vpn setting
+WG_PEER_PREFIX = "peers."           # plasma-nm keys a peer secret
+WG_PEER_SUFFIX = ".preshared-key"   # ... "peers.<public-key>.preshared-key"
 
 log = logging.getLogger("kwallet-nm-agent")
 
@@ -127,6 +143,77 @@ def encode_qmap(mapping):
                 raw = text.encode("utf-16-be")
                 out += len(raw).to_bytes(4, "big") + raw
     return dbus.ByteArray(bytes(out))
+
+
+# ---------------------------------------------------------------------------
+# VpnSecrets codec
+#
+# Every other setting gets one wallet map key per secret. The vpn setting does
+# not: NetworkManagerQt (VpnSetting::secretsToMap) flattens the whole secret map
+# into a single "VpnSecrets" entry whose value is key/value tokens joined by
+# "%SEP%". Verified against the live wallet and against the "%SEP%"/"VpnSecrets"
+# literals in libKF6NetworkManagerQt.
+# ---------------------------------------------------------------------------
+
+
+def decode_vpn_secrets(stored):
+    """Unpack a VpnSecrets blob into a plain key -> value mapping."""
+    packed = (stored or {}).get(VPN_SECRETS_KEY)
+    if not packed:
+        return {}
+    tokens = packed.split(VPN_SECRETS_SEP)
+    # A trailing key with no value is dropped, exactly as NetworkManagerQt does.
+    return {k: v for k, v in zip(tokens[0::2], tokens[1::2]) if k and v}
+
+
+def encode_vpn_secrets(secrets):
+    """Pack a key -> value mapping into the single-entry map plasma-nm reads."""
+    tokens = []
+    for key, value in secrets.items():
+        tokens += [key, value]
+    return {VPN_SECRETS_KEY: VPN_SECRETS_SEP.join(tokens)}
+
+
+# ---------------------------------------------------------------------------
+# WireGuard peers
+#
+# A wireguard wallet entry mixes the interface private key with one entry per
+# peer, keyed "peers.<public-key>.preshared-key". A peer secret cannot go back
+# to NM under that flat name -- NM answers "secret not found" -- it has to
+# travel inside the setting's "peers" array, next to the public key that says
+# which peer it belongs to.
+# ---------------------------------------------------------------------------
+
+
+def split_wireguard_secrets(stored):
+    """Split a wireguard wallet entry into (interface secrets, peer -> psk)."""
+    interface, peers = {}, {}
+    for key, value in (stored or {}).items():
+        if not key or not value:
+            continue
+        if key.startswith(WG_PEER_PREFIX) and key.endswith(WG_PEER_SUFFIX):
+            peers[key[len(WG_PEER_PREFIX):-len(WG_PEER_SUFFIX)]] = value
+        elif key in SECRET_KEYS[WG_SETTING]:
+            interface[key] = value
+    return interface, peers
+
+
+def wireguard_peers_reply(connection, peer_secrets):
+    """Build the peers array for a reply: one entry per peer NM told us about.
+
+    NM merges these by public key, so a peer we have no secret for is listed
+    with its public key alone and keeps whatever it already had.
+    """
+    peers = []
+    for peer in connection.get(WG_SETTING, {}).get("peers", []):
+        public_key = str(peer.get("public-key", ""))
+        if not public_key:
+            continue
+        entry = {"public-key": dbus.String(public_key)}
+        if public_key in peer_secrets:
+            entry["preshared-key"] = dbus.String(peer_secrets[public_key])
+        peers.append(dbus.Dictionary(entry, signature="sv"))
+    return dbus.Array(peers, signature="a{sv}")
 
 
 # ---------------------------------------------------------------------------
@@ -262,17 +349,48 @@ class KWalletSecretAgent(dbus.service.Object):
             log.warning("wallet lookup failed for %s (%s): %s", name, uuid, exc)
             raise NoSecretsError("wallet unavailable")
 
-        secrets = {k: v for k, v in (stored or {}).items() if k and v}
-        if not secrets:
+        peer_secrets = {}
+        if setting_name == VPN_SETTING:
+            secrets = decode_vpn_secrets(stored)
+        elif setting_name == WG_SETTING:
+            secrets, peer_secrets = split_wireguard_secrets(stored)
+        else:
+            secrets = {k: v for k, v in (stored or {}).items() if k and v}
+        if not secrets and not peer_secrets:
             log.info("miss %s (%s) %s", name, uuid, setting_name)
             raise NoSecretsError("no wallet entry")
 
-        log.info("hit %s (%s) %s -> %d key(s) [%s]",
-                 name, uuid, setting_name, len(secrets), ", ".join(sorted(secrets)))
-        return dbus.Dictionary(
-            {setting_name: dbus.Dictionary(
-                {k: dbus.String(v) for k, v in secrets.items()}, signature="sv")},
-            signature="sa{sv}")
+        # hints names the one secret NM is after, but VPN key names are
+        # plugin-specific and a VPN plugin routinely needs a second secret
+        # (openvpn: cert-pass alongside password) that the hint never mentions.
+        # So hints are logged and everything found is returned, as plasma-nm does.
+        if hints:
+            log.debug("hints for %s (%s) %s: %s",
+                      name, uuid, setting_name, ", ".join(str(h) for h in hints))
+
+        names = sorted(secrets)
+        if peer_secrets:
+            names.append("%d peer preshared-key(s)" % len(peer_secrets))
+        log.info("hit %s (%s) %s -> %d key(s) [%s]", name, uuid, setting_name,
+                 len(secrets) + len(peer_secrets), ", ".join(names))
+        if setting_name == VPN_SETTING:
+            # NM's vpn setting keeps its secrets one level down, in an a{ss}
+            # under "secrets" -- confirmed against libnm's own ONLY_SECRETS
+            # serialisation, which emits {"vpn": {"secrets": <a{ss}>}}. Current
+            # NM also folds flat top-level strings into the same place, but this
+            # is the shape libnm and plasma-nm actually send.
+            entries = dbus.Dictionary(
+                {"secrets": dbus.Dictionary(
+                    {k: dbus.String(v) for k, v in secrets.items()}, signature="ss")},
+                signature="sv")
+        else:
+            entries = dbus.Dictionary(
+                {k: dbus.String(v) for k, v in secrets.items()}, signature="sv")
+            if peer_secrets:
+                peers = wireguard_peers_reply(connection, peer_secrets)
+                if peers:
+                    entries["peers"] = peers
+        return dbus.Dictionary({setting_name: entries}, signature="sa{sv}")
 
     @dbus.service.method(NM_SECRET_AGENT_IFACE, in_signature="os", out_signature="")
     def CancelGetSecrets(self, connection_path, setting_name):
@@ -283,17 +401,35 @@ class KWalletSecretAgent(dbus.service.Object):
     def SaveSecrets(self, connection, connection_path):
         uuid, name = connection_ids(connection)
         for setting_name in self._settings:
-            wanted = SECRET_KEYS.get(setting_name, ())
             setting = connection.get(setting_name, {})
+            if setting_name == VPN_SETTING:
+                # The vpn setting splits into "data" and "secrets"; only the
+                # latter holds passwords, and its key names belong to the VPN
+                # plugin, so everything non-empty is kept rather than filtered.
+                source = setting.get("secrets", {})
+                wanted = list(source.keys())
+            else:
+                source = setting
+                wanted = SECRET_KEYS.get(setting_name, ())
             secrets = {}
             for key in wanted:
-                value = setting.get(key)
+                value = source.get(key)
                 if value is not None and str(value):
-                    secrets[key] = str(value)
+                    secrets[str(key)] = str(value)
+            if setting_name == WG_SETTING:
+                # Peer preshared keys arrive inside the peers array; the wallet
+                # keeps them one flat entry per peer, the way plasma-nm does.
+                for peer in setting.get("peers", []):
+                    public_key = str(peer.get("public-key", ""))
+                    value = peer.get("preshared-key")
+                    if public_key and value is not None and str(value):
+                        secrets[WG_PEER_PREFIX + public_key + WG_PEER_SUFFIX] = str(value)
             if not secrets:
                 continue
             try:
-                self._wallet.write_map(entry_key(uuid, setting_name), secrets)
+                self._wallet.write_map(
+                    entry_key(uuid, setting_name),
+                    encode_vpn_secrets(secrets) if setting_name == VPN_SETTING else secrets)
                 log.info("saved %s (%s) %s -> %d key(s) [%s]",
                          name, uuid, setting_name, len(secrets), ", ".join(sorted(secrets)))
             except (dbus.DBusException, RuntimeError) as exc:
@@ -387,7 +523,11 @@ def run_check(wallet, settings):
         _, _, setting = entry.partition(";")
         if setting in settings:
             try:
-                keys = sorted((wallet.read_map(entry) or {}).keys())
+                stored = wallet.read_map(entry) or {}
+                # Unpack the vpn blob so the real key names show, not "VpnSecrets".
+                if setting == VPN_SETTING:
+                    stored = decode_vpn_secrets(stored)
+                keys = sorted(stored.keys())
             except (dbus.DBusException, RuntimeError, ValueError) as exc:
                 keys = ["<unreadable: %s>" % exc]
             print("  %-58s %s" % (entry, ", ".join(keys)))
@@ -406,6 +546,8 @@ def parse_args(argv):
                         help="identifier registered with NetworkManager")
     parser.add_argument("--with-8021x", action="store_true",
                         help="also answer 802-1x (enterprise) secret requests")
+    parser.add_argument("--with-vpn", action="store_true",
+                        help="also answer vpn and wireguard secret requests")
     parser.add_argument("--no-unlock-prompt", action="store_true",
                         help="never let KWallet prompt; treat a locked wallet as a miss")
     parser.add_argument("--timeout", type=float, default=15.0,
@@ -427,6 +569,10 @@ def main(argv):
     settings = ["802-11-wireless-security"]
     if args.with_8021x:
         settings.append("802-1x")
+    if args.with_vpn:
+        # NM-native WireGuard rides along: it is a VPN to the user, plasma-nm
+        # keys it "{uuid};wireguard", and its private key is agent-owned too.
+        settings.extend((VPN_SETTING, WG_SETTING))
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     session_bus = dbus.SessionBus()

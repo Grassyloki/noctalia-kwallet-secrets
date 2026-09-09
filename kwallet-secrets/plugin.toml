@@ -4,15 +4,16 @@
 # psk-flags=1 prompts for a password. This plugin runs a second NetworkManager
 # secret agent that answers those requests from KWallet's "Network Management"
 # folder -- the same store plasma-nm uses -- with no kded6/plasma-nm involved.
+# VPN profiles have the same problem and are covered from the same folder.
 
 id = "grassyloki/kwallet-secrets"
 name = "KWallet Secrets"
-version = "1.0.0"
+version = "1.1.0"
 plugin_api = 28
 author = "grassyloki"
 license = "MIT"
 icon = "shield-lock"
-description = "Answers NetworkManager Wi-Fi secret requests from KWallet instead of prompting."
+description = "Answers NetworkManager Wi-Fi and VPN secret requests from KWallet instead of prompting."
 tags = ["service", "network", "privacy", "system"]
 dependencies = ["python3", "pkill", "systemd-cat", "kwalletd6"]
 
@@ -43,6 +44,13 @@ type = "bool"
 label_key = "settings.handle_8021x.label"
 description_key = "settings.handle_8021x.description"
 default = false
+
+[[setting]]
+key = "handle_vpn"
+type = "bool"
+label_key = "settings.handle_vpn.label"
+description_key = "settings.handle_vpn.description"
+default = true
 
 [[setting]]
 key = "unlock_prompt"

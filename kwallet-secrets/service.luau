@@ -76,6 +76,9 @@ local function agentCommand()
   if boolConfig("handle_8021x", false) then
     table.insert(parts, "--with-8021x")
   end
+  if boolConfig("handle_vpn", true) then
+    table.insert(parts, "--with-vpn")
+  end
   if not boolConfig("unlock_prompt", true) then
     table.insert(parts, "--no-unlock-prompt")
   end

@@ -1,11 +1,12 @@
 # KWallet Secrets
 
-NetworkManager keeps no copy of an *agent-owned* Wi-Fi password: it asks a
-registered secret agent for it every time you connect. On a Plasma desktop that
-agent is plasma-nm, which reads the password out of KWallet. On a Noctalia
-session there is no such agent, so every one of those networks asks you to type
-a password you already saved. This plugin fills that gap: it runs a secret agent
-that answers NetworkManager out of KWallet, so those networks just connect.
+NetworkManager keeps no copy of an *agent-owned* Wi-Fi password, and no copy of
+a VPN password at all: it asks a registered secret agent for them every time you
+connect. On a Plasma desktop that agent is plasma-nm, which reads them out of
+KWallet. On a Noctalia session there is no such agent, so every one of those
+networks and every VPN asks you to type a password you already saved. This
+plugin fills that gap: it runs a secret agent that answers NetworkManager out of
+KWallet, so they just connect.
 
 ## Plugin
 
@@ -36,7 +37,7 @@ any particular Wayland session.
 
 There is nothing to add to your bar and no panel to open. Enable the plugin and
 the service starts a background secret agent; from then on, saved Wi-Fi networks
-whose passwords live in KWallet connect without prompting.
+and VPNs whose passwords live in KWallet connect without prompting.
 
 To check that it is working:
 
@@ -55,12 +56,12 @@ and key *names* only, never a password:
 
 ```sh
 ~/.local/state/noctalia/plugins/materialized/community/kwallet-secrets/scripts/kwallet-nm-agent.py \
-  --check --with-8021x
+  --check --with-vpn --with-8021x
 ```
 
-If a network still prompts, the usual causes are a locked wallet, a profile
-whose password was never saved to KWallet in the first place, or a stored
-password that is simply wrong — see Notes.
+If a network or VPN still prompts, the usual causes are a locked wallet, a
+profile whose password was never saved to KWallet in the first place, or a
+stored password that is simply wrong — see Notes.
 
 ## Settings
 
@@ -73,6 +74,7 @@ them restarts the helper.
 | `folder_name` | `string` | `Network Management` | Folder inside the wallet holding the entries. This is where plasma-nm puts them; change it only if you keep them somewhere else. |
 | `app_id` | `string` | `Noctalia KWallet Secrets` | The name KWallet shows when it asks whether to grant access to the wallet. |
 | `handle_8021x` | `bool` | `false` | Also answer `802-1x` requests, for WPA-Enterprise networks such as eduroam. Off by default because those profiles often carry certificates that no wallet entry covers. |
+| `handle_vpn` | `bool` | `true` | Also answer `vpn` requests — OpenVPN, vpnc, openconnect, L2TP and the rest — and NetworkManager's own `wireguard` setting, including per-peer preshared keys. On by default, because a VPN secret is agent-owned in every profile plasma-nm imports and so prompts on every single connect. |
 | `unlock_prompt` | `bool` | `true` | Allow KWallet to raise its unlock dialog when the wallet is locked. Turn this off to treat a locked wallet as "no password" instead, so connecting fails quietly rather than popping a dialog. |
 | `debug_logging` | `bool` | `false` | Log every request, including the ones deliberately declined. Passwords are never logged at any level. |
 
@@ -88,6 +90,10 @@ registered secret agent at connect time. plasma-nm sets that flag on everything
 it saves, so a machine that used to run Plasma typically has a large pile of
 agent-owned profiles whose passwords live only in KWallet, under a folder called
 `Network Management`, keyed `{uuid};802-11-wireless-security`.
+
+VPN profiles are worse off still: NetworkManager never stores a VPN secret
+itself, so a VPN password is agent-owned whatever the flags say. plasma-nm keeps
+those in the same folder, keyed `{uuid};vpn`.
 
 Noctalia registers its own secret agent, but that agent has no persistent store
 — all it can do is prompt. So on a Noctalia session those profiles ask for a
@@ -111,11 +117,54 @@ NetworkManager makes on an agent:
 - **DeleteSecrets** — removes the wallet entry when the profile is deleted, so
   the wallet does not accumulate orphans.
 
+### VPN secrets are shaped differently
+
+Two things about the `vpn` setting do not look like any other setting, and the
+plugin special-cases both.
+
+On the NetworkManager side, a reply for `vpn` nests its secrets one level
+deeper: `{"vpn": {"secrets": {"password": "..."}}}`, where the inner map is
+`a{ss}`, not the `a{sv}` every other setting uses. That is what libnm itself
+emits and what plasma-nm sends, so it is the shape the plugin sends. (Modern
+NetworkManager is lenient and will also fold flat top-level string entries into
+the VPN secrets, but the nested form is the documented one.) The same asymmetry
+applies when NetworkManager hands a connection *back* on a save: the `vpn`
+setting arrives split into `data` and `secrets`, and only the latter holds
+passwords.
+
+On the KWallet side, the entry is not one map key per secret. NetworkManagerQt
+flattens the entire VPN secret map into a single `VpnSecrets` key whose value is
+`key`, separator, `value`, separator, `key`, … joined by the literal `%SEP%`.
+The plugin packs and unpacks that format, so `--check` still lists real key
+names and a password saved here is one plasma-nm can read.
+
+Which secrets a VPN uses depends on the VPN plugin — openvpn has `password`,
+`cert-pass` and `http-proxy-password`, vpnc has `Xauth password`, openconnect
+has a cookie — so unlike Wi-Fi there is no fixed list of key names to filter
+against. Whatever non-empty keys the wallet holds are returned, and whatever
+non-empty keys NetworkManager sends are saved. NetworkManager passes `hints`
+naming the one secret it is after; the plugin logs them and returns everything
+it found anyway, exactly as plasma-nm does, because a VPN plugin routinely needs
+a second secret that the hint never mentions.
+
+`wireguard` rides along under the same setting. NetworkManager's native
+WireGuard is not the `vpn` setting at all — it is its own setting, with an
+agent-owned `private-key` and an agent-owned `preshared-key` per peer — but it
+is a VPN to the user, and plasma-nm keys it `{uuid};wireguard`. Its reply is the
+ordinary flat shape for `private-key`. A peer's preshared key needs one more
+step: the wallet keys it `peers.<public-key>.preshared-key`, but sending it back
+under that flat name makes NetworkManager reject the whole answer with
+`secret not found`. It has to travel inside the setting's `peers` array instead,
+next to the public key that says which peer it belongs to, which is what the
+plugin builds from the peer list NetworkManager passes in with the request.
+
+### Other details
+
 Two details matter for behaviour you will actually notice. When NetworkManager
 sets the `REQUEST_NEW` flag it is telling the agent that the stored password was
 just rejected; the plugin answers `NoSecrets` there rather than handing back the
-same wrong password, so a changed Wi-Fi password produces a prompt instead of a
-retry loop. And every KWallet call is given a deadline (15 seconds by default).
+same wrong password, so a changed Wi-Fi or VPN password produces a prompt
+instead of a retry loop. And every KWallet call is given a deadline (15 seconds by default).
 `kwalletd6` can wedge — it has been seen stuck in `futex_wait`, hanging every
 `open()` — and a stuck wallet has to degrade to "no password" rather than
 freezing the connection attempt.

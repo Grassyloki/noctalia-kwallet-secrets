@@ -22,6 +22,10 @@
       "description": "Also answer 802-1x (WPA-Enterprise) requests, not just PSK networks.",
       "label": "Handle enterprise networks"
     },
+    "handle_vpn": {
+      "description": "Also answer VPN requests (OpenVPN and friends, plus NetworkManager's own WireGuard), so VPN secrets come from the wallet instead of a prompt.",
+      "label": "Handle VPN connections"
+    },
     "unlock_prompt": {
       "description": "Allow KWallet to prompt when the wallet is locked. Turn off to treat a locked wallet as \"no secret\".",
       "label": "Allow unlock prompt"
