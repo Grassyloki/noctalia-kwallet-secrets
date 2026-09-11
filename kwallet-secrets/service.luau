@@ -119,13 +119,23 @@ end
 local function startAgent()
   if starting then return end
   starting = true
+  -- Backgrounding makes the launch shell exit 0 whatever happens, so its status
+  -- cannot tell us anything: a missing systemd-cat would still look like success.
+  -- Wait for the helper's own lock to appear instead, the same signal isRunning
+  -- uses, and report what we actually observed. Up to 2s, inside RUN_TIMEOUT_MS.
   local cmd = string.format(
-    "(setsid systemd-cat -t %s %s </dev/null >/dev/null 2>&1 &) ; exit 0",
-    JOURNAL_TAG, agentCommand()
+    "(setsid systemd-cat -t %s %s </dev/null >/dev/null 2>&1 &) ; " ..
+    "for _ in 1 2 3 4 5 6 7 8 9 10; do " ..
+    "grep -q '%s'\"$(id -u)\"'$' /proc/net/unix && { echo yes; exit 0; }; " ..
+    "sleep 0.2; done; echo no",
+    JOURNAL_TAG, agentCommand(), LOCK
   )
-  noctalia.runAsync(cmd, function()
+  noctalia.runAsync(cmd, function(res)
     starting = false
-    status.running = true
+    status.running = noctalia.string.trim(res.stdout or "") == "yes"
+    if not status.running then
+      noctalia.log("helper did not come up; will retry on the next check")
+    end
     publish()
   end, RUN_TIMEOUT_MS)
 end
@@ -135,6 +145,8 @@ local function preflight()
     status.error = noctalia.tr("errors.python_missing")
   elseif not noctalia.commandExists("pkill") then
     status.error = noctalia.tr("errors.procps_missing")
+  elseif not noctalia.commandExists("systemd-cat") then
+    status.error = noctalia.tr("errors.systemd_cat_missing")
   elseif not noctalia.fileExists(pluginDir() .. SCRIPT) then
     status.error = noctalia.tr("errors.helper_missing")
   else
