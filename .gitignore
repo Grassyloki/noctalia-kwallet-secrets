@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 # luau-lsp type definitions, fetched on demand from official-plugins
 noctalia.d.luau
+# local publishing scaffolding (PR body, notes, publish.sh) -- not shipped
+.publishing/
