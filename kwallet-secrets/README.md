@@ -188,6 +188,15 @@ takes that lock at startup and a duplicate copy exits immediately, so no
 combination of restarts can end up with two agents fighting over the same
 identifier.
 
+A launch is confirmed the same way. The helper is started in the background, so
+the launching shell exits successfully whatever happens to it — a missing
+`systemd-cat` would look exactly like a clean start. Rather than trust that, the
+service waits for the lock to appear and only then reports the agent as running;
+if it never appears the service says so, logs it, and tries again on the next
+check. The four commands the plugin depends on are verified before any of this,
+and a missing one disables the plugin with a message naming it rather than
+failing quietly.
+
 ## Notes
 
 - **Processes spawned.** One long-lived `python3` process per session. Around

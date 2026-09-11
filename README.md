@@ -7,7 +7,7 @@ so it can be installed straight from here or submitted upstream unchanged.
 
 | Plugin | ID | What it does |
 | --- | --- | --- |
-| [kwallet-secrets](kwallet-secrets/) | `grassyloki/kwallet-secrets` | Answers NetworkManager's agent-owned Wi-Fi secret requests from KWallet instead of prompting. |
+| [kwallet-secrets](kwallet-secrets/) | `grassyloki/kwallet-secrets` | Answers NetworkManager's agent-owned Wi-Fi, VPN and WireGuard secret requests from KWallet instead of prompting. |
 
 ## Using it
 
@@ -32,32 +32,40 @@ noctalia msg plugins update dev
 
 ```
 kwallet-secrets/     the plugin, one top-level directory as community-plugins requires
-.publishing/         everything about getting it upstream; ignored by the plugin loader
-  PR-BODY.md         the pull request body, used verbatim by gh
-  NOTES.md           what to settle before taking the PR out of draft
-  publish.sh         fork -> branch -> copy -> commit -> push -> open/update the PR
 ```
 
-The plugin directory has to stay at the repo root and has to be named after the
-part of its `id` after the `/` -- that is how both `plugins source add ... git`
-and the upstream repo find it. Anything else lives in a dot-directory so the
-loader skips it.
+That directory has to stay at the repo root and has to be named after the part
+of its `id` after the `/` -- that is how both `plugins source add ... git` and
+the upstream repo find it. Everything tracked here is either the plugin or this
+README, so a clone is exactly what gets published.
 
 ## Publishing upstream
 
-```sh
-.publishing/publish.sh            # opens the PR as a draft
-.publishing/publish.sh --ready    # opens it ready for review
-```
+Submitting to [community-plugins](https://github.com/noctalia-dev/community-plugins)
+is driven by a script kept outside version control, in an untracked
+`.publishing/` directory on the maintainer's machine -- the PR body and its
+notes are workflow scratch, not something someone installing the plugin should
+have to clone.
 
-The script is idempotent: it refreshes the branch from `upstream/main`, replaces
-the plugin directory wholesale, refuses to touch anything outside it (CI owns
-`catalog.toml`), and edits the existing PR instead of opening a second one. The
-fork checkout it works in is `~/Projects/noctalia-community-plugins`.
+What it does, for anyone reproducing the flow by hand:
 
-Updating a released plugin is the same command -- bump `version` in
-`plugin.toml` first, and tick the "Update to an existing plugin" box in
-`.publishing/PR-BODY.md`.
+- Works in a fork checkout of community-plugins, a sibling directory at
+  `~/Projects/noctalia-community-plugins`.
+- Resets a branch to `upstream/main`, then extracts the plugin with
+  `git archive HEAD kwallet-secrets` -- never a filesystem copy, which would
+  drag in ignored build artifacts such as `__pycache__/*.pyc` that this repo
+  excludes but the upstream one does not.
+- Refuses to stage anything outside `kwallet-secrets/` (CI generates
+  `catalog.toml`), refuses to stage a generated file, and refuses to publish at
+  all when the plugin directory has uncommitted work, since it publishes `HEAD`.
+- Validates the PR body against upstream's own `enforce-pr-template.py`, which
+  matches every checklist line as an exact substring of the whitespace-collapsed
+  body -- a paraphrased line fails CI even while the PR is still a draft.
+- Opens the pull request, or edits the existing one rather than opening a
+  second.
+
+Updating a released plugin is the same flow: bump `version` in `plugin.toml`
+first, and tick the "Update to an existing plugin" box in the PR body.
 
 ## License
 
