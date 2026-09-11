@@ -140,6 +140,13 @@ existing="$(gh pr list --repo "$UPSTREAM_REPO" --head "$PR_BRANCH" --state open 
 if [[ -n "$existing" ]]; then
   info "Updating existing PR #$existing"
   gh pr edit "$existing" --repo "$UPSTREAM_REPO" --title "$PR_TITLE" --body-file "$PR_BODY"
+  # --ready has to mean the same thing for an update as it does for a create:
+  # gh pr edit cannot change draft state, so an existing draft would stay one.
+  if [[ "$DRAFT" != "true" ]] \
+     && [[ "$(gh pr view "$existing" --repo "$UPSTREAM_REPO" --json isDraft --jq .isDraft)" == "true" ]]; then
+    gh pr ready "$existing" --repo "$UPSTREAM_REPO"
+    ok "marked ready for review"
+  fi
   ok "updated: $(gh pr view "$existing" --repo "$UPSTREAM_REPO" --json url --jq .url)"
 else
   info "Opening a new pull request"
