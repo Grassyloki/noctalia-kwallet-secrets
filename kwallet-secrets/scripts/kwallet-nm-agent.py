@@ -236,6 +236,16 @@ class Wallet:
         self._allow_prompt = allow_prompt
         self._timeout = timeout
         self._handle = None
+        # A kwalletd6 restart -- logout/login, crash, package upgrade -- silently
+        # voids every handle it ever issued. Watch for it, rather than finding
+        # out as a run of lookups that fail for no visible reason.
+        bus.watch_name_owner(KWALLET_SERVICE, self._owner_changed)
+
+    def _owner_changed(self, owner):
+        # Fires once with the current owner, then on every kwalletd6 restart.
+        if self._handle is not None:
+            log.info("kwalletd6 restarted; dropping stale wallet handle")
+        self._handle = None
 
     def _iface(self):
         obj = self._bus.get_object(KWALLET_SERVICE, KWALLET_PATH, introspect=False)
@@ -253,7 +263,12 @@ class Wallet:
         name = self.name()
         if self._handle is not None:
             try:
-                if bool(api.isOpen(name, timeout=self._timeout)):
+                # isOpen(i) asks whether *this handle* is still live. The
+                # isOpen(s) overload only reports that the wallet is open for
+                # somebody, which stays true across a kwalletd6 restart -- so
+                # it would hand back a handle the new daemon never issued and
+                # every read against it would come back empty.
+                if bool(api.isOpen(dbus.Int32(self._handle), timeout=self._timeout)):
                     return self._handle
             except dbus.DBusException:
                 pass
@@ -576,6 +591,11 @@ def main(argv):
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     session_bus = dbus.SessionBus()
+    # The wallet lives on this bus, so an agent that outlives its session can
+    # serve nothing -- and because the single-instance lock is an abstract
+    # socket held by the process, a survivor would also stop the next session's
+    # agent from ever starting. Exit with the session instead.
+    session_bus.set_exit_on_disconnect(True)
     wallet = Wallet(session_bus, args.wallet, args.folder, args.app_id,
                     not args.no_unlock_prompt, args.timeout)
 

@@ -4,3 +4,7 @@ __pycache__/
 noctalia.d.luau
 # local publishing scaffolding (PR body, notes, publish.sh) -- not shipped
 .publishing/
+.gitignore
+MEMORY.md
+MEMORY/
+.claude
