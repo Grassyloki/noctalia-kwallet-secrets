@@ -47,6 +47,7 @@ NM_SECRET_AGENT_IFACE = "org.freedesktop.NetworkManager.SecretAgent"
 KWALLET_SERVICE = "org.kde.kwalletd6"                           # legacy KWallet daemon
 KWALLET_PATH = "/modules/kwalletd6"
 KWALLET_IFACE = "org.kde.KWallet"
+UNLOCK_POLL_SECONDS = 5             # how often a locked wallet is checked for unlock
 
 # NMSecretAgentGetSecretsFlags
 FLAG_ALLOW_INTERACTION = 0x1
@@ -92,6 +93,10 @@ class NoSecretsError(dbus.DBusException):
     """Tells NM "not mine" so it moves on to the next registered agent."""
 
     _dbus_error_name = "org.freedesktop.NetworkManager.SecretManager.NoSecrets"
+
+
+class WalletLockedError(RuntimeError):
+    """The wallet was locked and did not get unlocked for this lookup."""
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +241,7 @@ class Wallet:
         self._allow_prompt = allow_prompt
         self._timeout = timeout
         self._handle = None
+        self._unlock_watch = None
         # A kwalletd6 restart -- logout/login, crash, package upgrade -- silently
         # voids every handle it ever issued. Watch for it, rather than finding
         # out as a run of lookups that fail for no visible reason.
@@ -274,14 +280,48 @@ class Wallet:
                 pass
             self._handle = None
 
-        if not self._allow_prompt and not bool(api.isOpen(name, timeout=self._timeout)):
-            raise RuntimeError("wallet %r is locked and prompting is disabled" % name)
+        locked = not bool(api.isOpen(name, timeout=self._timeout))
+        if locked and not self._allow_prompt:
+            raise WalletLockedError("wallet %r is locked and prompting is disabled" % name)
 
-        handle = int(api.open(name, dbus.Int64(0), self._app_id, timeout=self._timeout))
+        # On a locked wallet open() blocks on the unlock dialog, so a timeout or
+        # a refusal here means "still locked", not "wallet broken".
+        try:
+            handle = int(api.open(name, dbus.Int64(0), self._app_id, timeout=self._timeout))
+        except dbus.DBusException as exc:
+            if locked:
+                raise WalletLockedError("wallet %r was not unlocked: %s"
+                                        % (name, exc.get_dbus_message()))
+            raise
         if handle <= 0:
+            if locked:
+                raise WalletLockedError("wallet %r was not unlocked (handle %d)" % (name, handle))
             raise RuntimeError("could not open wallet %r (handle %d)" % (name, handle))
         self._handle = handle
         return handle
+
+    def notify_when_unlocked(self, callback):
+        """Call callback once, the next time the wallet is seen open.
+
+        Polled rather than driven by the walletOpened signal: in kwallet 6.30
+        kwalletd6 is a front for ksecretd, and an unlock that happens there (PAM
+        at login, another app's prompt) is not known to reach kwalletd6's signal.
+        The poll only runs while a lookup is waiting on a locked wallet.
+        """
+        if self._unlock_watch is None:
+            self._unlock_watch = GLib.timeout_add_seconds(
+                UNLOCK_POLL_SECONDS, self._poll_unlock, callback)
+
+    def _poll_unlock(self, callback):
+        try:
+            unlocked = bool(self._iface().isOpen(self.name(), timeout=self._timeout))
+        except dbus.DBusException:
+            return True  # daemon not answering yet; keep waiting
+        if not unlocked:
+            return True
+        self._unlock_watch = None
+        callback()
+        return False
 
     def read_map(self, key):
         api = self._iface()
@@ -335,10 +375,11 @@ def connection_ids(connection):
 
 
 class KWalletSecretAgent(dbus.service.Object):
-    def __init__(self, system_bus, wallet, settings):
+    def __init__(self, system_bus, wallet, settings, on_wallet_unlocked):
         super().__init__(system_bus, NM_SECRET_AGENT_PATH)
         self._wallet = wallet
         self._settings = settings
+        self._on_wallet_unlocked = on_wallet_unlocked
 
     # -- NM -> us ----------------------------------------------------------
 
@@ -360,6 +401,14 @@ class KWalletSecretAgent(dbus.service.Object):
 
         try:
             stored = self._wallet.read_map(entry_key(uuid, setting_name))
+        except WalletLockedError as exc:
+            # Typical at login: NM asks before the wallet is unlocked, the
+            # connect fails, and NM blocks it from autoconnecting. Arrange a
+            # retry for when the wallet opens instead of leaving it failed.
+            log.warning("wallet locked for %s (%s): %s; retrying once it unlocks",
+                        name, uuid, exc)
+            self._wallet.notify_when_unlocked(self._on_wallet_unlocked)
+            raise NoSecretsError("wallet locked")
         except (dbus.DBusException, RuntimeError, ValueError) as exc:
             log.warning("wallet lookup failed for %s (%s): %s", name, uuid, exc)
             raise NoSecretsError("wallet unavailable")
@@ -500,6 +549,18 @@ class Registration:
             self.register()
         return False
 
+    def reregister(self):
+        """Register afresh so NM retries connections that failed for no secrets.
+
+        NM blocks a connection from autoconnecting after a no-secrets failure
+        and clears that block whenever a secret agent registers.
+        """
+        if not self._registered:
+            return  # NM is away; registering when it returns does the same
+        log.info("wallet unlocked; re-registering so NetworkManager retries")
+        self.unregister()
+        self.register()
+
     def unregister(self):
         if not self._registered:
             return
@@ -608,7 +669,11 @@ def main(argv):
         return 0
 
     system_bus = dbus.SystemBus()
-    KWalletSecretAgent(system_bus, wallet, settings)
+    # The agent object is exported before registering, so NM never calls into
+    # a path that does not exist yet; the unlock callback only fires later,
+    # from the main loop, by which time registration is bound.
+    KWalletSecretAgent(system_bus, wallet, settings,
+                       on_wallet_unlocked=lambda: registration.reregister())
     # Registration watches NM's bus name and registers as soon as it is there.
     registration = Registration(system_bus, args.identifier)
 
