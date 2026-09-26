@@ -9,6 +9,29 @@ so it can be installed straight from here or submitted upstream unchanged.
 | --- | --- | --- |
 | [kwallet-secrets](kwallet-secrets/) | `grassyloki/kwallet-secrets` | Answers NetworkManager's agent-owned Wi-Fi, VPN and WireGuard secret requests from KWallet instead of prompting. |
 
+## What it does with your passwords
+
+A plugin that hands out Wi-Fi and VPN passwords deserves suspicion, so here is
+the short version. The long version, with a diagram of one request and the
+commands to check each claim yourself, is
+[How your secrets are handled](kwallet-secrets/README.md#how-your-secrets-are-handled).
+
+- **One job.** When NetworkManager needs a password for one saved network or
+  VPN, the plugin reads that one entry from KWallet's `Network Management`
+  folder and gives it back to NetworkManager. Nothing else in your wallet is
+  read.
+- **One caller.** Only NetworkManager gets an answer. Ordinary programs cannot
+  reach the plugin at all, and other root processes are refused and logged.
+- **Nothing kept.** Passwords are not cached, not written to disk, not logged,
+  and never sent over the network; the plugin opens no network connection.
+- **Your wallet stays yours.** The plugin never sees your wallet password and
+  cannot open a locked wallet without you.
+- **Easy to stop.** Disabling the plugin stops the agent at once; there are no
+  files to clean up.
+- **Small enough to read.** All secret handling is one Python file,
+  [`kwallet-secrets/scripts/kwallet-nm-agent.py`](kwallet-secrets/scripts/kwallet-nm-agent.py),
+  with no dependencies beyond your distribution's D-Bus bindings.
+
 ## Using it
 
 Add this repo as a plugin source, then enable what you want:
