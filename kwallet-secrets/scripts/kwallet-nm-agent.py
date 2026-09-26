@@ -95,6 +95,13 @@ class NoSecretsError(dbus.DBusException):
     _dbus_error_name = "org.freedesktop.NetworkManager.SecretManager.NoSecrets"
 
 
+class NotAuthorizedError(dbus.DBusException):
+    """Refuses a caller that is not NetworkManager. NM's own error name, the one
+    libnm's agent answers with."""
+
+    _dbus_error_name = "org.freedesktop.NetworkManager.SecretAgent.PermissionDenied"
+
+
 class WalletLockedError(RuntimeError):
     """The wallet was locked and did not get unlocked for this lookup."""
 
@@ -375,17 +382,32 @@ def connection_ids(connection):
 
 
 class KWalletSecretAgent(dbus.service.Object):
-    def __init__(self, system_bus, wallet, settings, on_wallet_unlocked):
+    def __init__(self, system_bus, wallet, settings, on_wallet_unlocked, nm_owner):
         super().__init__(system_bus, NM_SECRET_AGENT_PATH)
         self._wallet = wallet
         self._settings = settings
         self._on_wallet_unlocked = on_wallet_unlocked
+        self._nm_owner = nm_owner
+
+    def _check_caller(self, method, sender):
+        # NM's bus policy lets every root process send to any SecretAgent, and
+        # this agent holds an open wallet: without this check one call from any
+        # root process returns decrypted secrets. Answer NetworkManager only,
+        # as libnm's own agent does.
+        owner = self._nm_owner()
+        if sender is None or sender != owner:
+            log.warning("rejected %s from %s: not NetworkManager (%s)",
+                        method, sender, owner or "not running")
+            raise NotAuthorizedError("caller is not NetworkManager")
 
     # -- NM -> us ----------------------------------------------------------
 
     @dbus.service.method(NM_SECRET_AGENT_IFACE,
-                         in_signature="a{sa{sv}}osasu", out_signature="a{sa{sv}}")
-    def GetSecrets(self, connection, connection_path, setting_name, hints, flags):
+                         in_signature="a{sa{sv}}osasu", out_signature="a{sa{sv}}",
+                         sender_keyword="sender")
+    def GetSecrets(self, connection, connection_path, setting_name, hints, flags,
+                   sender=None):
+        self._check_caller("GetSecrets", sender)
         setting_name = str(setting_name)
         uuid, name = connection_ids(connection)
 
@@ -456,13 +478,17 @@ class KWalletSecretAgent(dbus.service.Object):
                     entries["peers"] = peers
         return dbus.Dictionary({setting_name: entries}, signature="sa{sv}")
 
-    @dbus.service.method(NM_SECRET_AGENT_IFACE, in_signature="os", out_signature="")
-    def CancelGetSecrets(self, connection_path, setting_name):
+    @dbus.service.method(NM_SECRET_AGENT_IFACE, in_signature="os", out_signature="",
+                         sender_keyword="sender")
+    def CancelGetSecrets(self, connection_path, setting_name, sender=None):
+        self._check_caller("CancelGetSecrets", sender)
         # Lookups are short and time-boxed, so there is nothing to cancel.
         log.debug("cancel %s %s", connection_path, setting_name)
 
-    @dbus.service.method(NM_SECRET_AGENT_IFACE, in_signature="a{sa{sv}}o", out_signature="")
-    def SaveSecrets(self, connection, connection_path):
+    @dbus.service.method(NM_SECRET_AGENT_IFACE, in_signature="a{sa{sv}}o", out_signature="",
+                         sender_keyword="sender")
+    def SaveSecrets(self, connection, connection_path, sender=None):
+        self._check_caller("SaveSecrets", sender)
         uuid, name = connection_ids(connection)
         for setting_name in self._settings:
             setting = connection.get(setting_name, {})
@@ -499,8 +525,10 @@ class KWalletSecretAgent(dbus.service.Object):
             except (dbus.DBusException, RuntimeError) as exc:
                 log.warning("could not save %s (%s) %s: %s", name, uuid, setting_name, exc)
 
-    @dbus.service.method(NM_SECRET_AGENT_IFACE, in_signature="a{sa{sv}}o", out_signature="")
-    def DeleteSecrets(self, connection, connection_path):
+    @dbus.service.method(NM_SECRET_AGENT_IFACE, in_signature="a{sa{sv}}o", out_signature="",
+                         sender_keyword="sender")
+    def DeleteSecrets(self, connection, connection_path, sender=None):
+        self._check_caller("DeleteSecrets", sender)
         uuid, name = connection_ids(connection)
         for setting_name in self._settings:
             try:
@@ -518,6 +546,7 @@ class Registration:
         self._bus = system_bus
         self._identifier = identifier
         self._registered = False
+        self.owner = None           # NM's unique bus name: the only caller served
         self._bus.watch_name_owner(NM_SERVICE, self._owner_changed)
 
     def _manager(self):
@@ -526,6 +555,7 @@ class Registration:
 
     def _owner_changed(self, owner):
         # Fires once on startup with the current owner, then on every NM restart.
+        self.owner = str(owner) if owner else None
         if not owner:
             log.warning("NetworkManager went away; will re-register when it returns")
             self._registered = False
@@ -670,10 +700,11 @@ def main(argv):
 
     system_bus = dbus.SystemBus()
     # The agent object is exported before registering, so NM never calls into
-    # a path that does not exist yet; the unlock callback only fires later,
-    # from the main loop, by which time registration is bound.
+    # a path that does not exist yet; both callbacks only fire later, from the
+    # main loop, by which time registration is bound.
     KWalletSecretAgent(system_bus, wallet, settings,
-                       on_wallet_unlocked=lambda: registration.reregister())
+                       on_wallet_unlocked=lambda: registration.reregister(),
+                       nm_owner=lambda: registration.owner)
     # Registration watches NM's bus name and registers as soon as it is there.
     registration = Registration(system_bus, args.identifier)
 

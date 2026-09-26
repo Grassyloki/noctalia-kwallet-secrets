@@ -122,6 +122,13 @@ NetworkManager makes on an agent:
 - **DeleteSecrets** — removes the wallet entry when the profile is deleted, so
   the wallet does not accumulate orphans.
 
+All three answer NetworkManager and nobody else. NetworkManager's D-Bus policy
+lets any root process call a secret agent, and this one holds an unlocked
+wallet, so without a check a single call from any root process would return a
+decrypted password. The helper tracks which bus name NetworkManager currently
+owns and refuses every other caller with `PermissionDenied`, logging a
+`rejected` line, the same check libnm's own agent makes.
+
 ### VPN secrets are shaped differently
 
 Two things about the `vpn` setting do not look like any other setting, and the
